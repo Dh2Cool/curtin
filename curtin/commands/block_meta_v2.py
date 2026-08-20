@@ -26,7 +26,7 @@ from curtin.storage_config import (
     MBR_TYPE_TO_CURTIN_MAP,
     select_configs,
     )
-from curtin.udev import udevadm_settle
+from curtin.udev import udevadm_info, udevadm_settle
 
 
 def to_utf8_hex_notation(string: str) -> str:
@@ -141,6 +141,55 @@ def resize_ext(path, size):
     util.subp(['resize2fs', path, '{}k'.format(size_k)])
 
 
+def _vfat_identity(path):
+    # Read the filesystem identity from the udev database (populated by
+    # libblkid) instead of shelling out, so we can recreate the volume with
+    # the same FAT width, volume id and label. Preserving these is what lets
+    # an ESP still boot after being resized.
+    info = udevadm_info(path)
+    version = info.get('ID_FS_VERSION', '')
+    uuid = info.get('ID_FS_UUID', '')
+    if info.get('ID_FS_TYPE') != 'vfat' or not version.startswith('FAT'):
+        raise RuntimeError('refusing non-FAT filesystem on %s' % path)
+    if not re.fullmatch(r'[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}', uuid):
+        raise RuntimeError('could not read FAT volume id on %s' % path)
+    return {
+        'fat_bits': version[len('FAT'):],  # '12', '16' or '32'
+        'volume_id': uuid.replace('-', ''),
+        'label': info.get('ID_FS_LABEL'),
+    }
+
+
+def _vfat_mkfs_command(path, size, identity):
+    cmd = ['mkfs.fat', '-F', identity['fat_bits'], '-i', identity['volume_id']]
+    if identity['label']:
+        cmd += ['-n', identity['label']]
+    # size // 1024 is the block count in KiB. Passing it explicitly keeps the
+    # new filesystem within the partition, which for a shrink has not been
+    # resized down yet when this runs (see disk_handler_v2).
+    cmd += [path, str(size // 1024)]
+    return cmd
+
+
+def resize_vfat(path, size):
+    # FAT has no reliable in-place resizer, so back the files up, recreate the
+    # filesystem at the new size preserving its identity, and restore. Uses the
+    # same tempdir + util.mount pattern as resize_btrfs, and rsync (already a
+    # curtin dependency) for the copies. We use -rt rather than -a on purpose:
+    # FAT cannot store ownership or permissions, so preserving them would fail.
+    rsync = ['rsync', '-rt']
+    identity = _vfat_identity(path)
+    with tempfile.TemporaryDirectory(prefix='curtin-vfat-bak') as backup:
+        with tempfile.TemporaryDirectory(prefix='curtin-vfat-mnt') as mnt:
+            with util.mount(path, mnt):
+                util.subp(rsync + [os.path.join(mnt, ''), backup])
+        util.subp(_vfat_mkfs_command(path, size, identity), capture=True)
+        with tempfile.TemporaryDirectory(prefix='curtin-vfat-mnt') as mnt:
+            with util.mount(path, mnt):
+                util.subp(rsync + [os.path.join(backup, ''), mnt])
+    util.subp(['fsck.fat', '-n', path], capture=True)
+
+
 def resize_ntfs(path, size):
     util.subp(['ntfsresize', '--no-progress-bar', '-f', '-s', str(size), path],
               data=b'y\n',
@@ -163,6 +212,7 @@ resizers = {
     'ext3': resize_ext,
     'ext4': resize_ext,
     'ntfs': resize_ntfs,
+    'vfat': resize_vfat,
 }
 
 

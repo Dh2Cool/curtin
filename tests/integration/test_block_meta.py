@@ -3,6 +3,7 @@
 import dataclasses
 from dataclasses import dataclass
 import contextlib
+import hashlib
 import json
 import os
 from parameterized import parameterized
@@ -108,12 +109,30 @@ def _get_ntfs_size(dev, part_action):
     raise Exception('ntfs volume size not found')
 
 
+def _get_vfat_size(dev, part_action):
+    num = part_action['number']
+    output = util.subp(
+        ['fsck.fat', '-n', '-v', f'{dev}p{num}'], capture=True)[0]
+    sector_size = sector_count = None
+    for line in output.splitlines():
+        match = re.fullmatch(r'\s*(\d+) bytes per logical sector', line)
+        if match:
+            sector_size = int(match.group(1))
+        match = re.fullmatch(r'\s*(\d+) sectors total', line)
+        if match:
+            sector_count = int(match.group(1))
+    if sector_size is None or sector_count is None:
+        raise RuntimeError('FAT filesystem size not found')
+    return sector_size * sector_count
+
+
 _get_fs_sizers = {
     'btrfs': _get_btrfs_size,
     'ext2': _get_ext_size,
     'ext3': _get_ext_size,
     'ext4': _get_ext_size,
     'ntfs': _get_ntfs_size,
+    'vfat': _get_vfat_size,
 }
 
 
@@ -257,6 +276,10 @@ class TestBlockMeta(IntegrationTestCase):
             # less than requested.
             # In these tests it has been consistently 7 sectors fewer.
             tolerance = 512 * 10
+        elif fstype == 'vfat':
+            # mkfs.fat may leave one 1-KiB block outside the filesystem when
+            # given an explicit block count for the whole block device.
+            tolerance = 1024
         actual_fssize = _get_filesystem_size(dev, part_action, fstype)
         diff = expected - actual_fssize
         self.assertTrue(0 <= diff <= tolerance, f'difference of {diff}')
@@ -759,6 +782,52 @@ subprocess.run(cmd, env=env)
 
     def test_resize_down_ntfs(self):
         self._do_test_resize(80, 40, 'ntfs')
+
+    def test_resize_up_fat32_preserves_identity_and_data(self):
+        start = 128 << 20
+        end = 256 << 20
+        img = self.tmp_path('fat32-grow.img')
+        config = StorageConfigBuilder(version=2)
+        config.add_image(path=img, size='300M', ptable='gpt')
+        p1 = config.add_part(
+            size=start, offset=1 << 20, number=1, flag='boot')
+        self.run_bm(config.render())
+
+        sentinel_hash = hashlib.sha256(self.data.encode()).hexdigest()
+        with loop_dev(img) as dev:
+            path = f'{dev}p1'
+            util.subp([
+                'mkfs.fat', '-F', '32', '-n', 'ESP',
+                '-i', 'ABCD1234', path])
+            self.create_data(dev, p1)
+            self.check_fssize(dev, p1, 'vfat', start)
+
+        config.add_format(part=p1, fstype='vfat')
+        config.set_preserve()
+        p1['resize'] = True
+        p1['size'] = end
+        self.run_bm(config.render())
+
+        with loop_dev(img) as dev:
+            path = f'{dev}p1'
+            probe = util.subp(
+                ['blkid', '-p', '-o', 'export', '--', path],
+                capture=True)[0]
+            identity = dict(
+                line.split('=', 1) for line in probe.splitlines()
+                if '=' in line)
+            self.assertEqual('vfat', identity.get('TYPE'))
+            self.assertEqual('FAT32', identity.get('VERSION'))
+            self.assertEqual('ESP', identity.get('LABEL'))
+            self.assertEqual('ABCD-1234', identity.get('UUID'))
+            self.assertEqual([
+                PartData(number=1, offset=1 << 20, size=end),
+            ], summarize_partitions(dev))
+            self.check_fssize(dev, p1, 'vfat', end)
+            with self.open_file_on_part(dev, p1, 'rb') as stream:
+                self.assertEqual(
+                    sentinel_hash, hashlib.sha256(stream.read()).hexdigest())
+            util.subp(['fsck.fat', '-n', path], capture=True)
 
     def test_resize_logical(self):
         img = self.tmp_path('image.img')

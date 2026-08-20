@@ -3903,6 +3903,74 @@ class TestResizeBtrfs(CiTestCase):
             block_meta_v2.resize_btrfs('/dev/sda1', 5 << 30)
 
 
+class TestResizeVfat(CiTestCase):
+
+    fat32 = {
+        'ID_FS_TYPE': 'vfat',
+        'ID_FS_VERSION': 'FAT32',
+        'ID_FS_UUID': 'ABCD-1234',
+        'ID_FS_LABEL': 'EFI',
+    }
+
+    @patch('curtin.commands.block_meta_v2.udevadm_info')
+    def test_identity_preserves_any_fat_width(self, m_info):
+        # FAT16 as well as FAT32 must be accepted and preserved.
+        for version, bits in (('FAT16', '16'), ('FAT32', '32')):
+            m_info.return_value = dict(self.fat32, ID_FS_VERSION=version)
+            self.assertEqual(
+                {'fat_bits': bits, 'volume_id': 'ABCD1234', 'label': 'EFI'},
+                block_meta_v2._vfat_identity('/dev/sda1'))
+
+    @patch('curtin.commands.block_meta_v2.udevadm_info')
+    def test_identity_rejects_non_fat(self, m_info):
+        m_info.return_value = {
+            'ID_FS_TYPE': 'exfat', 'ID_FS_VERSION': '1.0',
+            'ID_FS_UUID': 'ABCD-1234'}
+        with self.assertRaisesRegex(RuntimeError, 'non-FAT'):
+            block_meta_v2._vfat_identity('/dev/sda1')
+
+    @patch('curtin.commands.block_meta_v2.udevadm_info')
+    def test_identity_rejects_unreadable_volume_id(self, m_info):
+        m_info.return_value = {
+            'ID_FS_TYPE': 'vfat', 'ID_FS_VERSION': 'FAT32', 'ID_FS_UUID': ''}
+        with self.assertRaisesRegex(RuntimeError, 'volume id'):
+            block_meta_v2._vfat_identity('/dev/sda1')
+
+    def test_mkfs_command_keeps_width_label_and_volume_id(self):
+        identity = {'fat_bits': '16', 'volume_id': 'ABCD1234', 'label': 'EFI'}
+        self.assertEqual([
+            'mkfs.fat', '-F', '16', '-i', 'ABCD1234',
+            '-n', 'EFI', '/dev/sda1', '65536',
+        ], block_meta_v2._vfat_mkfs_command('/dev/sda1', 64 << 20, identity))
+
+    def test_mkfs_command_without_label(self):
+        identity = {'fat_bits': '32', 'volume_id': 'ABCD1234', 'label': None}
+        self.assertEqual([
+            'mkfs.fat', '-F', '32', '-i', 'ABCD1234', '/dev/sda1', '65536',
+        ], block_meta_v2._vfat_mkfs_command('/dev/sda1', 64 << 20, identity))
+
+    @patch('curtin.commands.block_meta_v2.util.mount')
+    @patch('curtin.commands.block_meta_v2.util.subp')
+    @patch('curtin.commands.block_meta_v2._vfat_identity')
+    def test_resize_backs_up_reformats_and_restores(
+            self, m_identity, m_subp, m_mount):
+        m_identity.return_value = {
+            'fat_bits': '32', 'volume_id': 'ABCD1234', 'label': 'EFI'}
+
+        block_meta_v2.resize_vfat('/dev/sda1', 64 << 20)
+
+        # backup copy, reformat at the new size, restore copy, read-only verify
+        commands = [c.args[0] for c in m_subp.call_args_list]
+        self.assertEqual(4, len(commands))
+        self.assertEqual('rsync', commands[0][0])
+        self.assertEqual(
+            ['mkfs.fat', '-F', '32', '-i', 'ABCD1234', '-n', 'EFI',
+             '/dev/sda1', '65536'], commands[1])
+        self.assertEqual('rsync', commands[2][0])
+        self.assertEqual(['fsck.fat', '-n', '/dev/sda1'], commands[3])
+        self.assertEqual(2, m_mount.call_count)
+
+
 class TestPartitionVerifyFdasd(CiTestCase):
 
     def setUp(self):
