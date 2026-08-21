@@ -172,16 +172,26 @@ def _vfat_mkfs_command(path, size, identity):
 
 
 def resize_vfat(path, size):
-    # FAT has no reliable in-place resizer, so back the files up, recreate the
-    # filesystem at the new size preserving its identity, and restore. Uses the
-    # same tempdir + util.mount pattern as resize_btrfs, and rsync (already a
-    # curtin dependency) for the copies. We use -rt rather than -a on purpose:
-    # FAT cannot store ownership or permissions, so preserving them would fail.
+    # FAT has no in-place resizer, so back the files up, recreate the
+    # filesystem at the new size preserving its identity, and restore. -rt
+    # rather than -a: FAT cannot store ownership or permissions.
     rsync = ['rsync', '-rt']
     identity = _vfat_identity(path)
     with tempfile.TemporaryDirectory(prefix='curtin-vfat-bak') as backup:
+        LOG.debug('resizing vfat %s to %d bytes via backup at %s',
+                  path, size, backup)
         with tempfile.TemporaryDirectory(prefix='curtin-vfat-mnt') as mnt:
             with util.mount(path, mnt):
+                # The backup lives on tmpfs (RAM) in the installer, so fail
+                # early with a clear message rather than a raw rsync ENOSPC if
+                # the data in use will not fit.
+                total, free = util.get_fs_use_info(mnt)
+                used = total - free
+                avail = util.get_fs_use_info(backup)[1]
+                if used > avail:
+                    raise RuntimeError(
+                        'cannot resize %s: %d bytes in use exceeds %d'
+                        ' available for backup' % (path, used, avail))
                 util.subp(rsync + [os.path.join(mnt, ''), backup])
         util.subp(_vfat_mkfs_command(path, size, identity), capture=True)
         with tempfile.TemporaryDirectory(prefix='curtin-vfat-mnt') as mnt:

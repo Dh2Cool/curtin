@@ -3949,13 +3949,16 @@ class TestResizeVfat(CiTestCase):
             'mkfs.fat', '-F', '32', '-i', 'ABCD1234', '/dev/sda1', '65536',
         ], block_meta_v2._vfat_mkfs_command('/dev/sda1', 64 << 20, identity))
 
+    @patch('curtin.commands.block_meta_v2.util.get_fs_use_info')
     @patch('curtin.commands.block_meta_v2.util.mount')
     @patch('curtin.commands.block_meta_v2.util.subp')
     @patch('curtin.commands.block_meta_v2._vfat_identity')
     def test_resize_backs_up_reformats_and_restores(
-            self, m_identity, m_subp, m_mount):
+            self, m_identity, m_subp, m_mount, m_use):
         m_identity.return_value = {
             'fat_bits': '32', 'volume_id': 'ABCD1234', 'label': 'EFI'}
+        # (total, free): 4 MiB used on the volume, 1 GiB free for the backup.
+        m_use.side_effect = [(64 << 20, 60 << 20), (0, 1 << 30)]
 
         block_meta_v2.resize_vfat('/dev/sda1', 64 << 20)
 
@@ -3969,6 +3972,23 @@ class TestResizeVfat(CiTestCase):
         self.assertEqual('rsync', commands[2][0])
         self.assertEqual(['fsck.fat', '-n', '/dev/sda1'], commands[3])
         self.assertEqual(2, m_mount.call_count)
+
+    @patch('curtin.commands.block_meta_v2.util.get_fs_use_info')
+    @patch('curtin.commands.block_meta_v2.util.mount')
+    @patch('curtin.commands.block_meta_v2.util.subp')
+    @patch('curtin.commands.block_meta_v2._vfat_identity')
+    def test_resize_refuses_when_backup_would_not_fit(
+            self, m_identity, m_subp, m_mount, m_use):
+        m_identity.return_value = {
+            'fat_bits': '32', 'volume_id': 'ABCD1234', 'label': 'EFI'}
+        # 2 GiB in use but only 1 GiB free where the backup would go.
+        m_use.side_effect = [(4 << 30, 2 << 30), (0, 1 << 30)]
+
+        with self.assertRaisesRegex(RuntimeError, 'in use exceeds'):
+            block_meta_v2.resize_vfat('/dev/sda1', 64 << 20)
+
+        # bail before copying or reformatting anything
+        m_subp.assert_not_called()
 
 
 class TestPartitionVerifyFdasd(CiTestCase):
