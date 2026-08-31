@@ -4,6 +4,7 @@ from argparse import Namespace
 from collections import OrderedDict
 import copy
 from unittest.mock import (
+    ANY as MOCK_ANY,
     call,
     MagicMock,
     Mock,
@@ -3989,6 +3990,81 @@ class TestResizeVfat(CiTestCase):
 
         # bail before copying or reformatting anything
         m_subp.assert_not_called()
+
+    @patch('curtin.commands.block_meta_v2.util.subp')
+    @patch('curtin.commands.block_meta_v2.os.walk')
+    def test_attrs_capture_keeps_only_rhs_bits(self, m_walk, m_subp):
+        # a (archive) auto-sets on every write and is noise; only files with
+        # at least one of r/h/s make it into the map.
+        m_walk.return_value = [
+            ('/mnt', ['dir'], ['a.txt', 'b.txt']),
+            ('/mnt/dir', [], ['c.txt']),
+        ]
+        m_subp.side_effect = [('h a\n', ''), ('a\n', ''), ('r a\n', '')]
+        self.assertEqual(
+            {'a.txt': 'h', 'dir/c.txt': 'r'},
+            block_meta_v2._vfat_attrs_capture('/mnt'))
+
+    @patch('curtin.commands.block_meta_v2.util.subp')
+    def test_attrs_restore_clears_then_sets(self, m_subp):
+        # clear first so leftover bits from file creation do not merge
+        block_meta_v2._vfat_attrs_restore(
+            '/mnt', {'a.txt': 'h', 'dir/c.txt': 'rs'})
+        self.assertEqual([
+            call(['fatattr', '-', '/mnt/a.txt']),
+            call(['fatattr', '+h', '/mnt/a.txt']),
+            call(['fatattr', '-', '/mnt/dir/c.txt']),
+            call(['fatattr', '+rs', '/mnt/dir/c.txt']),
+        ], m_subp.call_args_list)
+
+    @patch('curtin.commands.block_meta_v2.shutil.which')
+    @patch('curtin.commands.block_meta_v2.os.walk')
+    @patch('curtin.commands.block_meta_v2.util.get_fs_use_info')
+    @patch('curtin.commands.block_meta_v2.util.mount')
+    @patch('curtin.commands.block_meta_v2.util.subp')
+    @patch('curtin.commands.block_meta_v2._vfat_identity')
+    def test_resize_replays_attrs_when_fatattr_present(
+            self, m_identity, m_subp, m_mount, m_use, m_walk, m_which):
+        m_which.return_value = '/usr/bin/fatattr'
+        m_identity.return_value = {
+            'fat_bits': '32', 'volume_id': 'ABCD1234', 'label': 'EFI'}
+        m_use.side_effect = [(64 << 20, 60 << 20), (0, 1 << 30)]
+        m_walk.return_value = [('/mnt', [], ['a.txt'])]
+        # capture sees 'h a', everything else (rsync/mkfs/replay/fsck) is a stub
+        m_subp.side_effect = [('h a\n', '')] + [('', '')] * 7
+
+        block_meta_v2.resize_vfat('/dev/sda1', 64 << 20)
+
+        # fatattr capture, rsync backup, mkfs, rsync restore, 2x replay,
+        # fsck - in that order (capture precedes the backup copy)
+        commands = [c.args[0] for c in m_subp.call_args_list]
+        self.assertEqual([
+            'fatattr', 'rsync', 'mkfs.fat', 'rsync',
+            'fatattr', 'fatattr', 'fsck.fat',
+        ], [c[0] for c in commands])
+        # replay: clear then set, after the restore rsync
+        self.assertEqual(
+            commands[4:6],
+            [['fatattr', '-', MOCK_ANY], ['fatattr', '+h', MOCK_ANY]])
+
+    @patch('curtin.commands.block_meta_v2.shutil.which')
+    @patch('curtin.commands.block_meta_v2.util.get_fs_use_info')
+    @patch('curtin.commands.block_meta_v2.util.mount')
+    @patch('curtin.commands.block_meta_v2.util.subp')
+    @patch('curtin.commands.block_meta_v2._vfat_identity')
+    def test_resize_skips_attrs_when_fatattr_absent(
+            self, m_identity, m_subp, m_mount, m_use, m_which):
+        m_which.return_value = None
+        m_identity.return_value = {
+            'fat_bits': '32', 'volume_id': 'ABCD1234', 'label': 'EFI'}
+        m_use.side_effect = [(64 << 20, 60 << 20), (0, 1 << 30)]
+
+        block_meta_v2.resize_vfat('/dev/sda1', 64 << 20)
+
+        # unchanged behavior: no fatattr anywhere
+        commands = [c.args[0] for c in m_subp.call_args_list]
+        self.assertEqual(['rsync', 'mkfs.fat', 'rsync', 'fsck.fat'],
+                         [c[0] for c in commands])
 
 
 class TestPartitionVerifyFdasd(CiTestCase):

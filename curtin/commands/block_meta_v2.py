@@ -2,6 +2,7 @@
 
 import os
 import re
+import shutil
 import tempfile
 from typing import (
     List,
@@ -171,12 +172,45 @@ def _vfat_mkfs_command(path, size, identity):
     return cmd
 
 
+VFAT_ATTR_CHARS = 'rhs'
+
+
+def _vfat_attrs_capture(mnt):
+    # Record the DOS attribute bits (r/h/s) of every file on the mounted
+    # volume, keyed by path relative to the mountpoint. FAT has no in-place
+    # way to carry these across a backup/recreate/restore, and rsync -rt
+    # drops them, so they must be captured and replayed. The archive bit (a)
+    # is auto-set on every write and the d/v bits are directory/volume-label
+    # markers, so those are ignored.
+    attrs = {}
+    for root, _dirs, files in os.walk(mnt):
+        for fname in files:
+            path = os.path.join(root, fname)
+            out = util.subp(['fatattr', path], capture=True)[0]
+            bits = ''.join(
+                c for c in str(out).split()[0] if c in VFAT_ATTR_CHARS)
+            if bits:
+                attrs[os.path.relpath(path, mnt)] = bits
+    return attrs
+
+
+def _vfat_attrs_restore(mnt, attrs):
+    # Clear first so bits left over from file creation do not merge with the
+    # replayed ones, then set. This must run after the restore rsync: a file
+    # marked read-only would block rsync's writes.
+    for rel, bits in attrs.items():
+        target = os.path.join(mnt, rel)
+        util.subp(['fatattr', '-', target])
+        util.subp(['fatattr', f'+{bits}', target])
+
+
 def resize_vfat(path, size):
     # FAT has no in-place resizer, so back the files up, recreate the
     # filesystem at the new size preserving its identity, and restore. -rt
     # rather than -a: FAT cannot store ownership or permissions.
     rsync = ['rsync', '-rt']
     identity = _vfat_identity(path)
+    has_fatattr = shutil.which('fatattr') is not None
     with tempfile.TemporaryDirectory(prefix='curtin-vfat-bak') as backup:
         LOG.debug('resizing vfat %s to %d bytes via backup at %s',
                   path, size, backup)
@@ -192,11 +226,17 @@ def resize_vfat(path, size):
                     raise RuntimeError(
                         'cannot resize %s: %d bytes in use exceeds %d'
                         ' available for backup' % (path, used, avail))
+                attrs = _vfat_attrs_capture(mnt) if has_fatattr else {}
+                if attrs:
+                    LOG.debug('captured fatattr bits for %d files on %s',
+                              len(attrs), path)
                 util.subp(rsync + [os.path.join(mnt, ''), backup])
         util.subp(_vfat_mkfs_command(path, size, identity), capture=True)
         with tempfile.TemporaryDirectory(prefix='curtin-vfat-mnt') as mnt:
             with util.mount(path, mnt):
                 util.subp(rsync + [os.path.join(backup, ''), mnt])
+                if has_fatattr and attrs:
+                    _vfat_attrs_restore(mnt, attrs)
     util.subp(['fsck.fat', '-n', path], capture=True)
 
 
