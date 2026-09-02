@@ -1525,4 +1525,29 @@ VERSION_ID="26.04"
             }
         )
 
+
+class TestMountAtTempDir(CiTestCase):
+
+    @mock.patch('curtin.util.do_umount')
+    @mock.patch('curtin.util.do_mount')
+    def test_mounts_and_yields_mountpoint(self, m_mount, m_umount):
+        with util.mount_at_temp_dir('/dev/sda1') as mnt:
+            self.assertTrue(mnt.startswith('/tmp/'))
+            self.assertTrue(os.path.isdir(mnt))
+            m_mount.assert_called_once_with('/dev/sda1', mnt)
+            m_umount.assert_not_called()
+        m_umount.assert_called_once_with(mnt)
+        self.assertFalse(os.path.exists(mnt))
+
+    @mock.patch('curtin.util.do_umount')
+    @mock.patch('curtin.util.do_mount')
+    def test_unmounts_when_body_raises(self, m_mount, m_umount):
+        mnt_point = None
+        with self.assertRaises(RuntimeError):
+            with util.mount_at_temp_dir('/dev/sda1') as mnt:
+                mnt_point = mnt
+                raise RuntimeError()
+        m_umount.assert_called_once_with(mnt_point)
+
+
 # vi: ts=4 expandtab syntax=python

@@ -564,6 +564,17 @@ def mount(src, target):
         do_umount(target)
 
 
+@contextmanager
+def mount_at_temp_dir(src, prefix='curtin-mnt'):
+    # Mount src at a fresh temporary directory and yield the mountpoint.
+    # mount()'s finally guarantees the unmount runs before the directory
+    # is cleaned up, so callers never need their own TemporaryDirectory
+    # just to have somewhere to mount.
+    with tempfile.TemporaryDirectory(prefix=prefix) as mnt:
+        with mount(src, mnt):
+            yield mnt
+
+
 def do_mount(src, target, opts=None):
     # mount src at target with opts and return True
     # if already mounted, return False
