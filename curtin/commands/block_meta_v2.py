@@ -2,7 +2,6 @@
 
 import os
 import re
-import tempfile
 from typing import (
     List,
     Optional,
@@ -127,12 +126,11 @@ def resize_btrfs(path, size):
         raise RuntimeError(
             'cannot resize multi-device btrfs filesystem on %s '
             '(found %d devices)' % (path, count))
-    with tempfile.TemporaryDirectory(prefix='curtin-btrfs-') as mountpoint:
-        with util.mount(path, mountpoint):
-            util.subp(['btrfs', 'filesystem', 'resize',
-                       '{devid}:{size}'.format(
-                            devid=btrfs_device_id, size=size),
-                       mountpoint])
+    with util.mount_at_temp_dir(path, prefix='curtin-btrfs-') as mountpoint:
+        util.subp(['btrfs', 'filesystem', 'resize',
+                   '{devid}:{size}'.format(
+                        devid=btrfs_device_id, size=size),
+                   mountpoint])
 
 
 def resize_ext(path, size):
