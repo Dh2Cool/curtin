@@ -5,6 +5,7 @@ from curtin import (block, compat, config, paths, storage_actions, util)
 from curtin.block import schemas
 from curtin.block import (bcache, clear_holders, dasd, iscsi, lvm, mdadm, mkfs,
                           multipath, zfs)
+from curtin.block import btrfs
 from curtin import distro
 from curtin.log import LOG, logged_time
 from curtin.reporter import events
@@ -2090,6 +2091,34 @@ def zfs_handler(info, storage_config, context):
             util.write_file(state['fstab'], fstab_entry, omode='a')
 
 
+def btrfs_subvolume_handler(info, storage_config, context):
+    """
+    Create a btrfs subvolume on a formatted btrfs filesystem
+    """
+    volume = info.get('volume')
+    if not volume:
+        raise ValueError("volume must be specified for btrfs_subvolume '%s'"
+                         % info.get('id'))
+
+    subvolume = info.get('subvolume')
+    if not subvolume:
+        raise ValueError("subvolume must be specified for btrfs_subvolume "
+                         "'%s'" % info.get('id'))
+
+    # 'volume' refers to a format action, not a block device. Resolve the
+    # device that the format action was applied to.
+    fmt = storage_config.get(volume)
+    if not fmt or fmt.get('type') != 'format':
+        raise ValueError(
+            "volume '%s' of btrfs_subvolume '%s' must reference a format "
+            "action" % (volume, info.get('id')))
+
+    volume_path = get_path_to_storage_volume(fmt.get('volume'),
+                                             storage_config)
+    LOG.info('Creating btrfs subvolume %s on %s', subvolume, volume_path)
+    btrfs.btrfs_subvolume_create(volume_path, subvolume)
+
+
 def get_device_paths_from_storage_config(storage_config):
     """Returns a list of device paths in a storage config which have wipe
        config enabled filtering out constructed paths that do not exist.
@@ -2255,6 +2284,7 @@ def meta_custom(args):
         'bcache': bcache_handler,
         'zfs': zfs_handler,
         'zpool': zpool_handler,
+        'btrfs_subvolume': btrfs_subvolume_handler,
         'nvme_controller': nvme_controller_handler,
     }
 
