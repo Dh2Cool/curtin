@@ -429,13 +429,13 @@ BTRFS_SUBVOLUME = {
     'description': ('Declarative syntax for specifying a btrfs subvolume '
                     'on an existing btrfs filesystem.'),
     'definitions': definitions,
-    'required': ['id', 'type', 'volume', 'subvolume'],
+    'required': ['id', 'type', 'volume', 'name'],
     'type': 'object',
     'additionalProperties': False,
     'properties': {
         'id': {'$ref': '#/definitions/id'},
         'volume': {'$ref': '#/definitions/ref_id'},
-        'subvolume': {'type': 'string', 'pattern': r'^[^/]+$'},
+        'name': {'type': 'string', 'pattern': r'^[^/\s]+$'},
         'type': {'const': 'btrfs_subvolume'},
     },
 }

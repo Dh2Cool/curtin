@@ -18,8 +18,4 @@ storage:
     - type: btrfs_subvolume
       id: subvolume-root
       volume: format-root
-      name: '@'
-    - type: btrfs_subvolume
-      id: subvolume-home
-      volume: format-root
-      name: '@home'
+      name: 'has space'

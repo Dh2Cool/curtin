@@ -2100,9 +2100,9 @@ def btrfs_subvolume_handler(info, storage_config, context):
         raise ValueError("volume must be specified for btrfs_subvolume '%s'"
                          % info.get('id'))
 
-    subvolume = info.get('subvolume')
-    if not subvolume:
-        raise ValueError("subvolume must be specified for btrfs_subvolume "
+    name = info.get('name')
+    if not name:
+        raise ValueError("name must be specified for btrfs_subvolume "
                          "'%s'" % info.get('id'))
 
     # 'volume' refers to a format action, not a block device. Resolve the
@@ -2115,8 +2115,8 @@ def btrfs_subvolume_handler(info, storage_config, context):
 
     volume_path = get_path_to_storage_volume(fmt.get('volume'),
                                              storage_config)
-    LOG.info('Creating btrfs subvolume %s on %s', subvolume, volume_path)
-    btrfs.btrfs_subvolume_create(volume_path, subvolume)
+    LOG.info('Creating btrfs subvolume %s on %s', name, volume_path)
+    btrfs.btrfs_subvolume_create(volume_path, name)
 
 
 def get_device_paths_from_storage_config(storage_config):
