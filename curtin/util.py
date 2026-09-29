@@ -7,6 +7,7 @@ import errno
 import fcntl
 import json
 import os
+from pathlib import Path
 import platform
 import re
 import shlex
@@ -562,6 +563,21 @@ def mount(src, target):
         yield
     finally:
         do_umount(target)
+
+
+@contextmanager
+def temporary_mount(device, prefix='curtin-'):
+    mnt = tempfile.mkdtemp(prefix=prefix)
+    try:
+        with mount(device, mnt):
+            yield Path(mnt)
+    finally:
+        try:
+            Path(mnt).rmdir()
+        except OSError as e:
+            LOG.warning(
+                f"Error occurred while removing temporary "
+                f"mount directory: {e}")
 
 
 def do_mount(src, target, opts=None):
